@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yulduz PvP</title>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+:root{--bg:#0f1b3d;--panel:#16264f;--me:#3ddc97;--foe:#ff6b6b;--star:#ffd23f;--text:#f5f7ff;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:column;align-items:center;padding:12px;gap:10px;min-height:100vh}
+h1{margin:0;font-size:1.5rem}
+#lobby{background:var(--panel);border-radius:16px;padding:20px;width:100%;max-width:420px;display:flex;flex-direction:column;gap:12px}
+#lobby p{margin:0;line-height:1.5}
+.id{font-size:2rem;font-weight:800;letter-spacing:.15em;color:var(--star)}
+input{font:inherit;padding:12px;border-radius:10px;border:2px solid #2c3e73;background:#0f1b3d;color:var(--text);text-transform:uppercase;letter-spacing:.1em}
+button{font:inherit;font-weight:700;border:0;border-radius:999px;padding:12px 22px;background:var(--star);color:#1a1a1a;cursor:pointer}
+button:focus-visible,input:focus-visible{outline:3px solid var(--me);outline-offset:2px}
+#game{display:none;flex-direction:column;align-items:center;gap:10px;width:100%;max-width:800px}
+#cv{width:100%;height:auto;background:var(--panel);border-radius:16px;touch-action:none}
+#end{display:none;text-align:center}
+#end p{margin:0 0 10px;font-size:1.2rem}
+#pad{display:none;width:100%;justify-content:space-between;align-items:center}
+.dp{display:flex;gap:8px}
+#pad button{width:60px;height:60px;padding:0;font-size:24px;touch-action:none;background:#2c3e73;color:var(--text)}
+#pad .fire{background:var(--foe);width:84px;height:84px}
+@media (pointer:coarse){#pad{display:flex}}
+.hint{margin:0;font-size:.9rem;opacity:.8;text-align:center}
+</style>
+</head>
+<body>
+<h1>Yulduz PvP</h1>
+
+<div id="lobby">
+  <p>Sening ID’ing:</p>
+  <div class="id" id="myid">…</div>
+  <p>Shu ID’ni do‘stingga yubor yoki uning ID’sini yozib qo‘shil:</p>
+  <input id="fid" maxlength="5" placeholder="Do‘st ID’si" autocomplete="off">
+  <button id="join" type="button">Qo‘shilish</button>
+  <p id="st">Ulanmoqda…</p>
+</div>
+
+<div id="game">
+  <canvas id="cv" width="800" height="500"></canvas>
+  <div id="end"><p id="endtxt"></p><button id="again" type="button">Qaytadan o‘ynash</button></div>
+  <div id="pad">
+    <div class="dp">
+      <button type="button" data-k="l">◀</button>
+      <button type="button" data-k="u">▲</button>
+      <button type="button" data-k="d">▼</button>
+      <button type="button" data-k="r">▶</button>
+    </div>
+    <button type="button" class="fire" id="fire">🔫</button>
+  </div>
+  <p class="hint">WASD yoki strelkalar: yurish. Sichqoncha: nishon. Bosish yoki probel: otish.</p>
+</div>
+
+<script>
+(function () {
+  var $ = function (i) { return document.getElementById(i); };
+  var W = 800, H = 500, R = 14, SPEED = 220, BSPEED = 620, CD = 0.4, DMG = 20;
+  var cv = $('cv'), ctx = cv.getContext('2d');
+  var me, foe, bullets = [], keys = {}, mouse = null;
+  var conn = null, peer = null, host = false, playing = false, over = false;
+  var cd = 0, last = 0, sendT = 0;
+  var keymap = {w:'u', arrowup:'u', s:'d', arrowdown:'d', a:'l', arrowleft:'l', d:'r', arrowright:'r'};
+
+  function code() {
+    var c = 'abcdefghjkmnpqrstuvwxyz23456789', s = '';
+    for (var i = 0; i < 5; i++) s += c[Math.random() * c.length | 0];
+    return s;
+  }
+  function say(t) { $('st').textContent = t; }
+  function send(d) { if (conn && conn.open) conn.send(d); }
+
+  /* Har bir o‘yinchiga avtomatik ID beriladi */
+  function init() {
+    var c = code();
+    peer = new Peer('yulduz-' + c);
+    peer.on('open', function () {
+      $('myid').textContent = c.toUpperCase();
+      say('Do‘st kutilmoqda yoki uning ID’sini yoz.');
+    });
+    peer.on('connection', function (x) {
+      if (conn || playing) { x.close(); return; }
+      host = true;
+      setup(x);
+    });
+    peer.on('error', function (e) {
+      if (e.type === 'unavailable-id') { peer.destroy(); init(); }
+      else if (e.type === 'peer-unavailable') say('Bunday ID topilmadi. Tekshirib, qayta yoz.');
+      else say('Xato: ' + e.type + '. Sahifani yangilab ko‘r.');
+    });
+  }
+
+  function setup(x) {
+    x.on('open', function () {
+      if (conn) { x.close(); return; }
+      conn = x;
+      begin();
+    });
+    x.on('data', onData);
+    x.on('close', function () {
+      if (playing && !over) finish('Raqib chiqib ketdi. Sen yutding!');
+    });
+  }
+
+  $('join').onclick = function () {
+    var v = $('fid').value.trim().toLowerCase();
+    if (v.length < 5) { say('ID 5 ta belgidan iborat.'); return; }
+    if (!peer || !peer.open) { say('Hali ulanmadi, biroz kut.'); return; }
+    host = false;
+    say('Ulanmoqda…');
+    setup(peer.connect('yulduz-' + v));
+  };
+
+  function reset() {
+    me  = {x: host ? 100 : 700, y: 250, hp: 100, a: host ? 0 : Math.PI};
+    foe = {x: host ? 700 : 100, y: 250, hp: 100, a: host ? Math.PI : 0};
+    bullets = []; over = false; cd = 0;
+    $('end').style.display = 'none';
+  }
+
+  function begin() {
+    $('lobby').style.display = 'none';
+    $('game').style.display = 'flex';
+    reset();
+    playing = true;
+    last = performance.now();
+    requestAnimationFrame(loop);
+  }
+
+  function finish(txt) {
+    over = true;
+    $('endtxt').textContent = txt;
+    $('end').style.display = 'block';
+  }
+
+  function onData(d) {
+    if (d.t === 's') { foe.x = d.x; foe.y = d.y; foe.a = d.a; }
+    else if (d.t === 'b') bullets.push({x: d.x, y: d.y, vx: d.vx, vy: d.vy, own: false});
+    else if (d.t === 'h') foe.hp = d.hp;
+    else if (d.t === 'd') { foe.hp = 0; finish('Sen yutding! 🏆'); }
+    else if (d.t === 'r') reset();
+  }
+
+  /* Tapancha: bitta o‘q, 20 zarar, 0.4 soniya tanaffus */
+  function fire() {
+    if (!playing || over || cd > 0) return;
+    cd = CD;
+    var cx = Math.cos(me.a), cy = Math.sin(me.a);
+    var b = {x: me.x + cx * 24, y: me.y + cy * 24, vx: cx * BSPEED, vy: cy * BSPEED};
+    bullets.push({x: b.x, y: b.y, vx: b.vx, vy: b.vy, own: true});
+    send({t: 'b', x: b.x, y: b.y, vx: b.vx, vy: b.vy});
+  }
+
+  function hit() {
+    me.hp -= DMG;
+    send({t: 'h', hp: me.hp});
+    if (me.hp <= 0) { send({t: 'd'}); finish('Sen yutqazding 😵'); }
+  }
+
+  function update(dt) {
+    var dx = (keys.r ? 1 : 0) - (keys.l ? 1 : 0);
+    var dy = (keys.d ? 1 : 0) - (keys.u ? 1 : 0);
+    if (dx || dy) {
+      var l = Math.hypot(dx, dy);
+      me.x += dx / l * SPEED * dt;
+      me.y += dy / l * SPEED * dt;
+    }
+    me.x = Math.max(R, Math.min(W - R, me.x));
+    me.y = Math.max(R, Math.min(H - R, me.y));
+    me.a = mouse ? Math.atan2(mouse.y - me.y, mouse.x - me.x)
+                 : Math.atan2(foe.y - me.y, foe.x - me.x);
+    cd -= dt;
+    for (var i = bullets.length - 1; i >= 0; i--) {
+      var b = bullets[i];
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      var t = b.own ? foe : me;
+      if (Math.hypot(b.x - t.x, b.y - t.y) < R + 3) {
+        bullets.splice(i, 1);
+        if (!b.own) hit();
+        continue;
+      }
+      if (b.x < 0 || b.x > W || b.y < 0 || b.y > H) bullets.splice(i, 1);
+    }
+    sendT -= dt;
+    if (sendT <= 0) { sendT = 0.05; send({t: 's', x: me.x, y: me.y, a: me.a}); }
+  }
+
+  function player(p, col) {
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.a);
+    ctx.fillStyle = '#cfd6ee';
+    ctx.fillRect(6, -3, 20, 6);
+    ctx.rotate(-p.a);
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(0, 0, R, 0, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,.5)';
+    ctx.fillRect(-20, -R - 14, 40, 6);
+    ctx.fillStyle = col;
+    ctx.fillRect(-20, -R - 14, 40 * Math.max(0, p.hp) / 100, 6);
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.fillStyle = '#16264f';
+    ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(255,255,255,.06)';
+    ctx.lineWidth = 1;
+    for (var x = 0; x <= W; x += 50) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    for (var y = 0; y <= H; y += 50) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+    player(foe, '#ff6b6b');
+    player(me, '#3ddc97');
+    ctx.fillStyle = '#ffd23f';
+    bullets.forEach(function (b) { ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, 7); ctx.fill(); });
+  }
+
+  function loop(t) {
+    if (!playing) return;
+    var dt = Math.min(0.05, (t - last) / 1000);
+    last = t;
+    if (!over) update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  /* Boshqaruv */
+  function pos(e) {
+    var r = cv.getBoundingClientRect();
+    return {x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height};
+  }
+  window.addEventListener('keydown', function (e) {
+    var k = keymap[e.key.toLowerCase()];
+    if (k) { keys[k] = true; e.preventDefault(); }
+    if (e.code === 'Space') { e.preventDefault(); fire(); }
+  });
+  window.addEventListener('keyup', function (e) {
+    var k = keymap[e.key.toLowerCase()];
+    if (k) keys[k] = false;
+  });
+  cv.addEventListener('pointermove', function (e) { if (e.pointerType === 'mouse') mouse = pos(e); });
+  cv.addEventListener('pointerdown', function (e) {
+    mouse = e.pointerType === 'mouse' ? pos(e) : null;
+    fire();
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('#pad [data-k]'), function (b) {
+    var k = b.getAttribute('data-k');
+    b.addEventListener('pointerdown', function (e) { e.preventDefault(); keys[k] = true; });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (n) {
+      b.addEventListener(n, function () { keys[k] = false; });
+    });
+  });
+  $('fire').addEventListener('pointerdown', function (e) { e.preventDefault(); mouse = null; fire(); });
+
+  $('again').onclick = function () {
+    if (conn && conn.open) { send({t: 'r'}); reset(); }
+    else location.reload();
+  };
+
+  init();
+})();
+</script>
+</body>
+</html>
